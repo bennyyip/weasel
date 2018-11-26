@@ -47,4 +47,6 @@ private:
 	CIcon m_iconDisabled;
 	CIcon m_iconEnabled;
 	CIcon m_iconAlpha;
+
+
 };

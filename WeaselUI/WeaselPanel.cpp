@@ -3,14 +3,24 @@
 #include <WeaselCommon.h>
 #include <Usp10.h>
 
+#include <dwrite.h>
+
 #include "VerticalLayout.h"
 #include "HorizontalLayout.h"
 #include "FullScreenLayout.h"
+#include "GdiTextRenderer.h"
 
 // for IDI_ZH, IDI_EN
 #include <resource.h>
 
+#pragma comment(lib,"d2d1.lib")
+
+#pragma comment(lib,"dwrite.lib")
+
+
 using namespace weasel;
+
+static HRESULT  DWriteCreateResources();
 
 WeaselPanel::WeaselPanel(weasel::UI &ui)
 	: m_layout(NULL), 
@@ -269,6 +279,7 @@ void WeaselPanel::DoPaint(CDCHandle dc)
 LRESULT WeaselPanel::OnCreate(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
 {
 	Refresh();
+	DWriteCreateResources();
 	//CenterWindow();
 	GetWindowRect(&m_inputPos);
 	return TRUE;
@@ -332,6 +343,162 @@ void WeaselPanel::_RepositionWindow()
 	SetWindowPos(HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE|SWP_NOACTIVATE);
 }
 
+static IDWriteFactory *g_pDWriteFactory = NULL;
+static IDWriteGdiInterop *g_pGdiInterop = NULL;
+
+
+static HRESULT  DWriteCreateResources() {
+	HRESULT hr = S_OK;
+	if (g_pDWriteFactory) return hr;
+
+	// Create the DirectWrite factory.
+	if (SUCCEEDED(hr)) {
+		hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
+			__uuidof(IDWriteFactory),
+			reinterpret_cast<IUnknown **>(&g_pDWriteFactory));
+	}
+
+	// Create a GDI interop interface.
+	if (SUCCEEDED(hr)) {
+		hr = g_pDWriteFactory->GetGdiInterop(&g_pGdiInterop);
+	}
+	return hr;
+}
+
+static HRESULT _TextOutDirectWrite(CDCHandle dc, int x, int y, CRect const& rc, LPCWSTR psz, int cch) {
+	HRESULT hr = S_OK;
+	IDWriteBitmapRenderTarget *g_pBitmapRenderTarget = NULL;
+	IDWriteTextRenderer *g_pGdiTextRenderer = NULL;
+	IDWriteRenderingParams *g_pRenderingParams = NULL;
+    auto cfont = dc.GetCurrentFont();
+    // DirectWrite variables.
+    IDWriteFontFamily *pFontFamily = NULL;
+    IDWriteFont *pFont = NULL;
+    IDWriteLocalizedStrings *pFamilyNames = NULL;
+
+    UINT32 length = 0;
+    UINT32 index = 0;
+    float fontSize = 0;
+    wchar_t *name = nullptr;
+
+    IDWriteTextFormat *g_pTextFormat = NULL;
+	IDWriteTextLayout *g_pTextLayout = NULL;
+    HFONT hfont = dc.GetCurrentFont().m_hFont;
+
+    // Logical (GDI) font.
+    LOGFONT lf = {};
+
+    if (SUCCEEDED(hr)) {
+        // Get a logical font from the font handle.
+        GetObject(hfont, sizeof(LOGFONT), &lf);
+    }
+
+    // Convert to a DirectWrite font.
+    if (SUCCEEDED(hr)) {
+        hr = g_pGdiInterop->CreateFontFromLOGFONT(&lf, &pFont);
+    }
+
+    // Get the font family.
+    if (SUCCEEDED(hr)) {
+        hr = pFont->GetFontFamily(&pFontFamily);
+    }
+
+    // Get a list of localized family names.
+    if (SUCCEEDED(hr)) {
+        hr = pFontFamily->GetFamilyNames(&pFamilyNames);
+    }
+
+    // Select the first locale.  This is OK, because we are not displaying the
+    // family name.
+    index = 0;
+
+    // Get the length of the family name.
+    if (SUCCEEDED(hr)) {
+        hr = pFamilyNames->GetStringLength(index, &length);
+    }
+
+
+	if (SUCCEEDED(hr))
+	{
+		// Allocate a new string.
+		name = new (std::nothrow) wchar_t[length + 1];
+		if (name == NULL)
+		{
+			hr = E_OUTOFMEMORY;
+		}
+	}
+
+
+    // Get the actual family name.
+    if (SUCCEEDED(hr)) {
+        hr = pFamilyNames->GetString(index, name, length + 1);
+    }
+
+    if (SUCCEEDED(hr)) {
+        // Calculate the font size.
+
+		fontSize = lf.lfHeight;
+		//fontSize = -MulDiv(lf.lfHeight, dc.GetDeviceCaps(LOGPIXELSY), 72);
+        //fontSize = (float)-MulDiv(lf.lfHeight, 96,
+        //                          GetDeviceCaps(dc.m_hDC, LOGPIXELSY));
+    }
+
+    // Create a text format using the converted font information.
+    if (SUCCEEDED(hr)) {
+        hr = g_pDWriteFactory->CreateTextFormat(
+            name, // Font family name.
+            NULL, pFont->GetWeight(), pFont->GetStyle(), pFont->GetStretch(),
+            fontSize, L"en-us", &g_pTextFormat);
+    }
+
+    // Create a text layout.
+    if (SUCCEEDED(hr)) {
+        hr = g_pDWriteFactory->CreateTextLayout(
+            psz, cch, g_pTextFormat, 1024.0f, 480.0f, &g_pTextLayout);
+    }
+
+	// Underline and strikethrough are part of a LOGFONT structure, but are not
+	// part of a DWrite font object so we must set them using the text layout.
+	if (lf.lfUnderline)
+	{
+		DWRITE_TEXT_RANGE textRange = { 0, cch };
+		g_pTextLayout->SetUnderline(true, textRange);
+	}
+
+// Underline and strikethrough are part of a LOGFONT structure, but are not
+// part of a DWrite font object so we must set them using the text layout.
+	if (lf.lfStrikeOut)
+	{
+		DWRITE_TEXT_RANGE textRange = { 0, cch };
+		g_pTextLayout->SetStrikethrough(true, textRange);
+	}
+
+    // Create default rendering params for our custom renderer.
+    if (SUCCEEDED(hr)) {
+        hr = g_pDWriteFactory->CreateRenderingParams(&g_pRenderingParams);
+    }
+
+	// Create default rendering params for our custom renderer.
+    if (SUCCEEDED(hr)) {
+        hr = g_pGdiInterop->CreateBitmapRenderTarget(
+            dc.m_hDC, rc.right, rc.bottom, &g_pBitmapRenderTarget);
+    }
+
+    if (SUCCEEDED(hr)) {
+        // Initialize the custom renderer class.
+        g_pGdiTextRenderer = new (std::nothrow)
+            GdiTextRenderer(g_pBitmapRenderTarget, g_pRenderingParams);
+    }
+
+	// Draw the text below the GDI text
+	if (SUCCEEDED(hr))
+	{
+		hr = g_pTextLayout->Draw(NULL, g_pGdiTextRenderer, x, y);
+	}
+
+    return hr;
+}
+
 static HRESULT _TextOutWithFallback(CDCHandle dc, int x, int y, CRect const& rc, LPCWSTR psz, int cch)
 {
     SCRIPT_STRING_ANALYSIS ssa;
@@ -365,7 +532,7 @@ static HRESULT _TextOutWithFallback(CDCHandle dc, int x, int y, CRect const& rc,
 
 void WeaselPanel::_TextOut(CDCHandle dc, int x, int y, CRect const& rc, LPCWSTR psz, int cch)
 {
-	if (FAILED(_TextOutWithFallback(dc, x, y, rc, psz, cch))) {
+	if (FAILED(_TextOutDirectWrite(dc, x, y, rc, psz, cch))) {
 		dc.TextOutW(x, y, psz, cch);
 	}
 }
